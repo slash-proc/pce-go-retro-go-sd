@@ -1,157 +1,93 @@
-# Retro-Go SD template — one project = one CORE or one GWHB homebrew.
+# PC Engine / PC Engine CD — standalone Retro-Go SD core
+# (firmware main: pce-go + Core/Src/porting/pce, adapted as dynamic CORE).
 #
-#   make                  — build + pack (default: PROJECT_KIND=core)
-#   make PROJECT_KIND=homebrew
-#   make host             — Linux/macOS SDL binary (same src/main.c)
-#   make host HOST_SDL=3  — same with SDL3
-#   make docker           — same build inside Docker (no host toolchain)
-#   make docker_shell     — interactive shell in the builder image
+#   make                  — build + pack → pce.bin
+#   make host             — Linux/macOS SDL binary
+#   make docker           — Docker builder image
 #
-# Customize CORE_NAME / pack metadata below, then replace src/main.c.
-# Verbose compiler lines: make V=
+# Sources copied from ori/game-and-watch-retro-go-sd (firmware PCE before
+# external-core split). BUILD_DIR=build/core must match ld/pce_core.ld.
 
 #######################################
 # Project identity
 #######################################
-# core     → pack_core.py     → /cores/<name>.bin
-# homebrew → pack_homebrew.py → /homebrews/<name>.bin
 PROJECT_KIND ?= core
 
-CORE_NAME  := example
-CORE_ENTRY := app_main
+CORE_NAME  := pce
+CORE_ENTRY := app_main_pce
 
 CORE_C_SOURCES := \
-src/main.c
+src/pce-go/gfx.c \
+src/pce-go/h6280.c \
+src/pce-go/pce.c \
+src/porting/sound_pce.c \
+src/porting/pce_cd.c \
+src/porting/pce_scsi.c \
+src/porting/pce_adpcm.c \
+src/main_pce.c
 
-# Relative path so Docker bind-mounts work (do NOT use $(abspath) — it
-# bakes the host path into Make prerequisites / .d files). Do not name
-# this SDK_ROOT: that env var is commonly set by Android SDK installs.
+CORE_C_INCLUDES := \
+-Isrc/porting \
+-Isrc/pce-go
+
 GNW_CORE_SDK ?= sdk
-# Separate build trees so switching PROJECT_KIND does not reuse stale .o.
 BUILD_DIR ?= build/$(PROJECT_KIND)
 
-#######################################
-# SDK bridge overrides (optional)
-#######################################
-# The SDK bridge (gw_core_bridge.c) provides default implementations for
-# memcpy/memset/memmove/__aeabi_mem* and malloc/calloc/free/realloc.
-# Define these to exclude the SDK versions and supply your own:
-#
-#   GW_CORE_BRIDGE_DISABLE_SDK_MEMCPY — exclude memcpy only.
-#       Memmove stays routed through the SDK bridge (Doom/fastmem needs it).
-#
-#   GW_CORE_BRIDGE_DISABLE_SDK_MEMSET — exclude memset only.
-#
-#   GW_CORE_BRIDGE_DISABLE_SDK_MEMMOVE — exclude memmove too (requires your
-#       core to provide memmove).
-#
-#   GW_CORE_BRIDGE_DISABLE_SDK_MEMOPS — back-compat: exclude the full memops
-#       block (memcpy/memset/memmove + all __aeabi_mem* helpers).
-#
-#   GW_CORE_BRIDGE_DISABLE_SDK_MALLOC — exclude the malloc/calloc/free/
-#       realloc wrappers that forward to the firmware ABI heap. Use this when
-#       the core links its own allocator or needs a custom malloc/free path.
-#
-# To enable, add the define(s) to CORE_C_DEFS below, e.g.:
-#   CORE_C_DEFS += -DGW_CORE_BRIDGE_DISABLE_SDK_MEMCPY
-#   CORE_C_DEFS += -DGW_CORE_BRIDGE_DISABLE_SDK_MEMSET
-#   CORE_C_DEFS += -DGW_CORE_BRIDGE_DISABLE_SDK_MALLOC
+# Match firmware release -O2 for the interpreter / CD path.
+OPT = -O2
+PCE_ALIGN_CFLAGS := -falign-functions -falign-jumps -fmerge-all-constants
+
+CORE_LDSCRIPT := ld/pce_core.ld
+CORE_EXTRA_SEGMENTS := itcm:core_itcm
 
 #######################################
 # Kind-specific compile defs + packing
 #######################################
 ifeq ($(PROJECT_KIND),core)
-# Match release-firmware layout of retro_emulator_file_t: COVERFLOW fields
-# sit before cheat_* — CHEAT_CODES alone with COVERFLOW=0 misaligns pointers.
-# MAX_CHEAT_CODES mirrors Makefile.common's release default.
 CORE_C_DEFS := \
 -DPROJECT_KIND_CORE=1 \
 -DCOVERFLOW=1 \
 -DCHEAT_CODES=1 \
--DMAX_CHEAT_CODES=13
+-DMAX_CHEAT_CODES=13 \
+-DGNW_DISABLE_COMPRESSION \
+-DTARGET_GNW
 
-PACKED_BIN  := $(CORE_NAME).bin
-PAD_LOGO    := src/assets/pad.png
-HEADER_LOGO := src/assets/header.png
-
-else ifeq ($(PROJECT_KIND),homebrew)
-CORE_C_DEFS := \
--DPROJECT_KIND_HOMEBREW=1
-
-PACKED_BIN := ExampleHB.bin
-HB_NAME    := Example Homebrew
-# Compact coverflow tile (HW max is 186x100 — do not use full width by default).
-COVER_JPG    := $(BUILD_DIR)/cover.jpg
-COVER_WIDTH  ?= 128
-COVER_HEIGHT ?= 96
+PACKED_BIN   := $(CORE_NAME).bin
+PAD_LOGO     := src/assets/pad.bmp
+HEADER_LOGO  := src/assets/header.bmp
+HEADER_CD    := src/assets/header_cd.bmp
 
 else
-$(error PROJECT_KIND must be 'core' or 'homebrew' (got '$(PROJECT_KIND)'))
+$(error PROJECT_KIND must be 'core' (got '$(PROJECT_KIND)'))
 endif
 
 include $(GNW_CORE_SDK)/Makefile
 
-PACK_CORE     := $(GNW_CORE_SDK)/tools/pack_core.py
-PACK_HOMEBREW := $(GNW_CORE_SDK)/tools/pack_homebrew.py
-GEN_COVER     := scripts/gen_homebrew_cover.py
+CFLAGS += $(PCE_ALIGN_CFLAGS)
 
-#######################################
-# Packed header version
-#######################################
-# gnw_core_meta_t / gwhb_meta_t only store major.minor.patch (0..255).
-# CORE_VERSION is the full git describe string passed to the packers; they
-# extract the leading vX.Y.Z (NOTAG / missing tags → 0.0.0).
-# Override: make CORE_VERSION=v1.2.3
+PACK_CORE := $(GNW_CORE_SDK)/tools/pack_core.py
+
 CORE_VERSION ?= $(shell git describe --tags --dirty 2>/dev/null || echo NOTAG)
 
 #######################################
 # Pack
 #######################################
-.PHONY: pack cover
+.PHONY: pack
 
-ifeq ($(PROJECT_KIND),core)
-
-pack: $(TARGET_BIN) $(PAD_LOGO) $(HEADER_LOGO)
+pack: $(TARGET_BIN) $(BUILD_DIR)/pce_core_itcm.bin $(PAD_LOGO) $(HEADER_LOGO) $(HEADER_CD)
 	$(V)$(ECHO) [ PACK CORE ] $(PACKED_BIN) version=$(CORE_VERSION)
 	$(V)python3 $(PACK_CORE) \
 		--elf $(TARGET_ELF) --bin $(TARGET_BIN) \
-		--system-name "Example Core" --dirname example \
-		--extensions "bin" \
-		--core-name "Example" \
+		--system name="PC Engine",dirname=pce,pad_logo=$(PAD_LOGO),header_logo=$(HEADER_LOGO),ext=pce,parse=rom,cheat_ext=pceplus \
+		--system name="PC Engine CD",dirname=pcecd,pad_logo=$(PAD_LOGO),header_logo=$(HEADER_CD),ext=cue,parse=cdrom,cheat_ext=pceplus \
+		--logo-invert \
+		--segment itcm:__ITCM_CORE_START__:__CORE_ITCM_CODE_END__:__CORE_ITCM_BSS_END__:$(BUILD_DIR)/pce_core_itcm.bin \
+		--core-name "PCE-GO" \
 		--version "$(CORE_VERSION)" \
-		--cheat-ext ggcodes \
-		--pad-logo $(PAD_LOGO) \
-		--header-logo $(HEADER_LOGO) \
 		--out $(PACKED_BIN)
-
-else
-
-.PHONY: cover
-cover: $(COVER_JPG)
-
-# Must stay ≤ gui.c COVER_MAX_WIDTH x COVER_MAX_HEIGHT (186x100) and
-# COVER_SIZE (10 KiB) — oversized covers smash the HW JPEG scratch.
-$(COVER_JPG): $(GEN_COVER)
-	$(V)$(ECHO) [ COVER ] $(COVER_JPG) ($(COVER_WIDTH)x$(COVER_HEIGHT))
-	$(V)python3 $(GEN_COVER) \
-		--out $(COVER_JPG) \
-		--title "$(HB_NAME)" \
-		--width $(COVER_WIDTH) \
-		--height $(COVER_HEIGHT)
-
-pack: $(TARGET_BIN) $(COVER_JPG)
-	$(V)$(ECHO) [ PACK GWHB ] $(PACKED_BIN) version=$(CORE_VERSION)
-	$(V)python3 $(PACK_HOMEBREW) \
-		--elf $(TARGET_ELF) --bin $(TARGET_BIN) \
-		--name "$(HB_NAME)" --version "$(CORE_VERSION)" \
-		--cover $(COVER_JPG) \
-		--out $(PACKED_BIN)
-
-endif
 
 all: pack
 
-# Read-only helpers for CI / scripts (make print-PROJECT_KIND, etc.).
 .PHONY: print-PROJECT_KIND print-PACKED_BIN print-CORE_NAME print-DOCKER_IMAGE \
 	print-TARGET_ELF print-TARGET_MAP print-CORE_VERSION
 print-PROJECT_KIND:
@@ -171,12 +107,9 @@ print-CORE_VERSION:
 
 clean::
 	$(V)rm -f $(PACKED_BIN)
-ifeq ($(PROJECT_KIND),homebrew)
-	$(V)rm -f $(COVER_JPG)
-endif
 
 #######################################
-# Docker (same image as firmware repo)
+# Docker
 #######################################
 .PHONY: docker docker_pull docker_shell
 
@@ -185,7 +118,6 @@ DOCKER_REPOSITORY ?= sylverb/retro-go-sd-builder
 DOCKER_IMAGE ?= $(DOCKER_REPOSITORY):$(RELEASE_VERSION)
 
 DOCKER_TTY_FLAG := $(shell if [ -t 0 ]; then echo -it; else echo; fi)
-# Host UID so build/ artifacts are not root-owned on the bind mount.
 DOCKER_USER := $(shell id -u):$(shell id -g)
 DOCKER_RUN := docker run --rm $(DOCKER_TTY_FLAG) \
 	--user $(DOCKER_USER) \
@@ -193,8 +125,6 @@ DOCKER_RUN := docker run --rm $(DOCKER_TTY_FLAG) \
 	-w /opt/workdir \
 	$(DOCKER_IMAGE)
 
-# Compile inside the published builder image (uses the local copy).
-# Refresh with `make docker_pull` when you want a newer digest for the tag.
 docker:
 	$(V)$(ECHO) "[ DOCKER ]" $(DOCKER_IMAGE) "PROJECT_KIND=$(PROJECT_KIND)"
 	$(V)$(DOCKER_RUN) make --no-print-directory -j$$(nproc) PROJECT_KIND=$(PROJECT_KIND)
@@ -203,11 +133,10 @@ docker_pull:
 	$(V)$(ECHO) "[ PULL ]" $(DOCKER_IMAGE)
 	$(V)docker pull $(DOCKER_IMAGE)
 
-# Interactive shell with the same image / mount as `make docker`.
 docker_shell:
 	$(DOCKER_RUN) bash
 
 #######################################
-# Host SDL (Linux / macOS)
+# Host SDL
 #######################################
 include host/Makefile.host

@@ -42,6 +42,7 @@ HOST_DEFS := \
 	-DHOST_BUILD=1 \
 	-DHOST_SDL=$(HOST_SDL) \
 	-DHOST_SCALE=$(HOST_SCALE) \
+	-DHOST_APP_MAIN=$(CORE_ENTRY) \
 	-DSDL_MAIN_HANDLED=1 \
 	-DIS_LITTLE_ENDIAN \
 	-DGNW_DISABLE_COMPRESSION \
@@ -56,6 +57,7 @@ HOST_INCLUDES := \
 	-I$(HOST_INC_ROOT)/Core/Inc/porting \
 	-I$(HOST_INC_ROOT)/Core/Src/porting/lib \
 	-I$(HOST_INC_ROOT)/Core/Src/porting/lib/FatFs \
+	$(CORE_C_INCLUDES) \
 	$(HOST_PKG_CFLAGS)
 
 HOST_CFLAGS := -O2 -g -Wall -Wextra -std=c11 \

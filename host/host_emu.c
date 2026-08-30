@@ -22,6 +22,7 @@
 #include "odroid_settings.h"
 #include "odroid_input.h"
 #include "odroid_audio.h"
+#include "odroid_display.h"
 #include "common.h"
 #include "rom_manager.h"
 #include "main.h"
@@ -201,9 +202,12 @@ void gw_core_bridge_init(void)
 
 void host_set_rom_path(const char *path)
 {
+    static char host_ext[16];
+
     if (!path || !path[0])
         return;
     memset(&host_active_file, 0, sizeof(host_active_file));
+    memset(host_ext, 0, sizeof(host_ext));
     strncpy(host_active_file.path, path, sizeof(host_active_file.path) - 1);
     {
         const char *base = strrchr(path, '/');
@@ -215,6 +219,22 @@ void host_set_rom_path(const char *path)
         strncpy(host_active_file.name, base ? base + 1 : path,
                 sizeof(host_active_file.name) - 1);
     }
+    {
+        const char *dot = strrchr(host_active_file.name, '.');
+        if (dot && dot[1]) {
+            size_t i;
+            for (i = 0; i + 1 < sizeof(host_ext) && dot[1 + i]; i++) {
+                char c = dot[1 + i];
+                if (c >= 'A' && c <= 'Z')
+                    c = (char)(c - 'A' + 'a');
+                host_ext[i] = c;
+            }
+            host_ext[i] = '\0';
+            host_active_file.ext = host_ext;
+        } else {
+            host_active_file.ext = "";
+        }
+    }
     FILE *f = fopen(path, "rb");
     if (f) {
         fseek(f, 0, SEEK_END);
@@ -223,6 +243,41 @@ void host_set_rom_path(const char *path)
         if (sz > 0)
             host_active_file.size = (uint32_t)sz;
     }
+}
+
+int host_map_sd_path(const char *sd_path, char *out, size_t out_sz)
+{
+    const char *root;
+
+    if (!sd_path || !sd_path[0] || !out || out_sz == 0)
+        return -1;
+
+    root = getenv("HOST_SD");
+    if (root && root[0]) {
+        size_t root_len = strlen(root);
+        while (root_len > 0 && (root[root_len - 1] == '/' || root[root_len - 1] == '\\'))
+            root_len--;
+        if (sd_path[0] == '/' || sd_path[0] == '\\')
+            snprintf(out, out_sz, "%.*s%s", (int)root_len, root, sd_path);
+        else
+            snprintf(out, out_sz, "%.*s/%s", (int)root_len, root, sd_path);
+        return 0;
+    }
+
+    if (sd_path[0] == '/' || sd_path[0] == '\\')
+        snprintf(out, out_sz, ".%s", sd_path);
+    else
+        snprintf(out, out_sz, "%s", sd_path);
+    return 0;
+}
+
+uint8_t *host_load_sd_file(const char *sd_path, uint32_t *size_out)
+{
+    char mapped[1024];
+
+    if (host_map_sd_path(sd_path, mapped, sizeof(mapped)) != 0)
+        return NULL;
+    return odroid_overlay_cache_file_in_flash(mapped, size_out, false);
 }
 
 int host_poll_events(void)
@@ -296,6 +351,11 @@ void lcd_set_refresh_rate(uint32_t frequency)
 {
     if (frequency)
         lcd_refresh_hz = frequency;
+}
+
+void lcd_setup_framebuffers(lcd_mode_t mode)
+{
+    (void)mode;
 }
 
 uint32_t lcd_get_last_refresh_rate(void)
@@ -619,11 +679,43 @@ void odroid_overlay_alert(const char *text) { (void)text; }
 uint8_t *odroid_overlay_cache_file_in_flash(const char *file_path, uint32_t *file_size_p,
                                             bool byte_swap)
 {
-    (void)file_path;
+    FILE *f;
+    long sz;
+    uint8_t *buf;
+    size_t n;
+
     (void)byte_swap;
     if (file_size_p)
         *file_size_p = 0;
-    return NULL;
+    if (!file_path || !file_path[0])
+        return NULL;
+    f = fopen(file_path, "rb");
+    if (!f)
+        return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    sz = ftell(f);
+    if (sz <= 0) {
+        fclose(f);
+        return NULL;
+    }
+    rewind(f);
+    buf = (uint8_t *)malloc((size_t)sz);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    n = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    if (n != (size_t)sz) {
+        free(buf);
+        return NULL;
+    }
+    if (file_size_p)
+        *file_size_p = (uint32_t)sz;
+    return buf;
 }
 
 size_t odroid_overlay_cache_file_in_ram(const char *file_path, uint8_t *dest_address)
@@ -726,6 +818,40 @@ void odroid_system_get_save_path(char *path, size_t size, int slot)
     if (slot < 0)
         slot = 0;
     snprintf(path, size, "host_saves/%s.slot%d.sav", stem, slot);
+}
+
+char *odroid_system_get_path(emu_path_type_t type, const char *romPath)
+{
+    char *path = (char *)malloc(512);
+    char stem[64];
+    const char *name = romPath;
+
+    if (!path)
+        return NULL;
+    if (name && name[0]) {
+        const char *base = strrchr(name, '/');
+#ifdef _WIN32
+        const char *base2 = strrchr(name, '\\');
+        if (base2 && (!base || base2 > base))
+            base = base2;
+#endif
+        name = base ? base + 1 : name;
+    } else if (ACTIVE_FILE && ACTIVE_FILE->name[0]) {
+        name = ACTIVE_FILE->name;
+    } else {
+        name = "host";
+    }
+    host_sanitize_stem(stem, sizeof(stem), name);
+
+    switch (type) {
+    case ODROID_PATH_SAVE_SRAM:
+        snprintf(path, 512, "host_saves/%s.sram", stem);
+        break;
+    default:
+        snprintf(path, 512, "host_saves/%s.dat", stem);
+        break;
+    }
+    return path;
 }
 
 static int host_ensure_save_dir(void)
@@ -844,6 +970,12 @@ void BSOD(BSOD_t fault, uint32_t pc, uint32_t lr)
 }
 void boot_magic_set(uint32_t magic) { (void)magic; }
 void SystemClock_Config(uint8_t new_oc_level) { (void)new_oc_level; }
+uint8_t odroid_settings_cpu_oc_level_get(void) { return 0; }
+uint32_t get_SystemCoreClock(void) { return 280000000u; }
+odroid_display_scaling_t odroid_display_get_scaling_mode(void)
+{
+    return ODROID_DISPLAY_SCALING_FIT;
+}
 void uptime_inc(void) {}
 uint32_t uptime_get(void) { return host_platform_ticks_ms(); }
 

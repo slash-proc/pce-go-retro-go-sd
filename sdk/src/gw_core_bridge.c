@@ -543,7 +543,8 @@ void core_lcd_backlight_off(void)
 }
 void core_lcd_setup_framebuffers(int lcd_mode)
 {
-    gw_firmware_abi()->lcd_setup_framebuffers(lcd_mode);
+    if (gw_firmware_abi()->lcd_setup_framebuffers)
+        gw_firmware_abi()->lcd_setup_framebuffers(lcd_mode);
 }
 void core_lcd_get_bonus_pool(uint8_t **out_ptr, size_t *out_size)
 {

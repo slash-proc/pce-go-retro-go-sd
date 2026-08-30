@@ -23,6 +23,10 @@ void gw_core_bridge_init(void);
 void host_set_rom_path(const char *path);
 int host_poll_events(void); /* returns 0 if the window should quit */
 
+/* Map firmware SD absolute path ("/bios/pce/syscard3.pce") via $HOST_SD. */
+int host_map_sd_path(const char *sd_path, char *out, size_t out_sz);
+uint8_t *host_load_sd_file(const char *sd_path, uint32_t *size_out);
+
 #ifdef __cplusplus
 }
 #endif
