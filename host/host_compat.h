@@ -19,6 +19,9 @@ extern uint32_t __CORE_CODE_END__;
 
 void gw_core_bridge_init(void);
 
+/* Base of the host RAM_EMU bump pool (same role as device ram_start). */
+void *host_ram_pool_base(void);
+
 /* Optional: path passed on the CLI / HOST_ROM for core ROM load. */
 void host_set_rom_path(const char *path);
 int host_poll_events(void); /* returns 0 if the window should quit */

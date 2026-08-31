@@ -57,10 +57,6 @@ SECTIONS
 
   __CORE_BSS_END__ = .;
 
-  /* Same symbols as STM32H7B0VBTx_*.ld .overlay_pce_bss (firmware PCE). */
-  _PCE_ROM_UNPACK_BUFFER = __CORE_BSS_END__;
-  _PCE_ROM_UNPACK_BUFFER_SIZE = __RAM_EMU_END__ - __CORE_BSS_END__;
-
   ASSERT(__CORE_BSS_END__ <= __RAM_EMU_END__,
          "Error: PCE core RAM_EMU segment (code+data+bss) overflows RAM_EMU")
 

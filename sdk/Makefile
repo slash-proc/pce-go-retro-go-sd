@@ -154,7 +154,11 @@ all: $(TARGET_BIN) $(CORE_EXTRA_SEGMENT_BINS)
 $(BUILD_DIR):
 	$(V)mkdir -p $(BUILD_DIR)
 
-$(BRIDGE_OBJECTS): CFLAGS += -fno-builtin-memcpy -fno-builtin-memmove -fno-builtin-memset
+# -fno-tree-loop-distribute-patterns is NOT redundant with -fno-builtin-*: the
+# loop-distribution pass still rewrites the byte-copy tails inside memcpy/
+# memset/memmove into calls to themselves, which recurses until the stack dies.
+$(BRIDGE_OBJECTS): CFLAGS += -fno-builtin-memcpy -fno-builtin-memmove -fno-builtin-memset \
+-fno-tree-loop-distribute-patterns
 
 $(BUILD_DIR)/%.o: %.c $(REDEFINE_SYMS_FILE) | $(BUILD_DIR)
 	$(V)$(ECHO) [ CC ] $(notdir $<)

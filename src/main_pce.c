@@ -13,7 +13,6 @@
 #include "main.h"
 #include "bilinear.h"
 #include "gw_lcd.h"
-#include "gw_buttons.h"
 #include "rom_manager.h"
 #include "common.h"
 #include "sound_pce.h"
@@ -27,7 +26,20 @@
 #include "gw_malloc.h"
 #ifndef HOST_BUILD
 #include "gw_core_bridge.h"
+#else
+#include "host_compat.h"
 #endif
+
+/* Base of the RAM_EMU bump window (after core BSS). Device: ram_start.
+ * Host: real 64-bit pool pointer (ram_start is only uint32_t). */
+static inline unsigned char *pce_ram_window(void)
+{
+#ifdef HOST_BUILD
+    return (unsigned char *)host_ram_pool_base();
+#else
+    return (unsigned char *)(uintptr_t)ram_start;
+#endif
+}
 
 //#define PCE_SHOW_DEBUG
 #define FPS_NTSC 60
@@ -208,6 +220,15 @@ void osd_log(int type, const char *format, ...) {
     va_start(ap, format);
     vprintf(format, ap);
     va_end(ap);
+}
+
+/* pce.c exposes pce_run() which calls these; app_main_pce drives gfx_run()
+ * from its own frame loop (same as ori linux/pce/osd_stubs.c). */
+void osd_gfx_blit(void) {}
+void osd_vsync(void) {}
+void osd_input_read(uint8_t joypads[8])
+{
+    (void)joypads;
 }
 
 static void blit();
@@ -431,8 +452,9 @@ static void pce_rom_full_patch()
 
 static void pce_rom_patch()
 {
-    unsigned char *dest = (unsigned char *)&_PCE_ROM_UNPACK_BUFFER;
-    uint32_t available_size = (uint32_t)&_PCE_ROM_UNPACK_BUFFER_SIZE;
+    /* Scratch in the free RAM_EMU window (not claimed via ram_malloc). */
+    unsigned char *dest = pce_ram_window();
+    uint32_t available_size = (uint32_t)ram_get_free_size();
 
     uint8_t *DynMEM[16]; //max 16*16=256k;  single bank is 8k but here must two bank batch move
     uint8_t DynCount = 0;
@@ -508,8 +530,8 @@ pce_osd_getromdata(unsigned char **data)
 #if SD_CARD == 1
 #error "Roms compression is not supported on SD Card"
 #else
-    unsigned char *dest = (unsigned char *)&_PCE_ROM_UNPACK_BUFFER;
-    uint32_t available_size = (uint32_t)&_PCE_ROM_UNPACK_BUFFER_SIZE;
+    unsigned char *dest = pce_ram_window();
+    uint32_t available_size = (uint32_t)ram_get_free_size();
     uint32_t src_size = 0;
     const unsigned char *src = odroid_overlay_cache_file_in_flash(ACTIVE_FILE->path, &src_size, false);
     if (src == NULL || src_size == 0) {
@@ -525,6 +547,7 @@ pce_osd_getromdata(unsigned char **data)
     else
 #endif
 #endif
+
     if (strcmp(ACTIVE_FILE->ext, "cue") == 0) {
         /* PCE-CD: the "ROM" is the System Card BIOS (mapped at bank 0); the disc
          * image itself is streamed from SD separately. XIP it from flash like a
@@ -656,7 +679,7 @@ void LoadCartPCE() {
         PCE.MemoryMapW[0x00] = PCE.IOAREA;
 
     //pce_rom_patch
-    unsigned char *dest = (unsigned char *)&_PCE_ROM_UNPACK_BUFFER;
+    unsigned char *dest = pce_ram_window();
     printf("Rom: %p %p \n", PCE.ROM, dest);
 
     if (PCE.ROM != dest)
@@ -665,22 +688,23 @@ void LoadCartPCE() {
         pce_rom_full_patch();
 
     /* PCE-CD: back the CD-ROM2 program-RAM banks with real RAM. The System Card
-     * is XIP'd from flash (pce_osd_getromdata), so the entire ROM-unpack buffer
-     * is free to host the CD RAM. Banks 0x68-0x87 are contiguous: 0x80-0x87 is
-     * the 64KB base RAM, 0x68-0x7F adds the 192KB Super CD RAM (256KB total).
-     * Without this every CD bank aliases the shared 8KB NULLRAM and a loaded
-     * game overwrites itself, then traps. Done last so it overrides the
-     * System-Card ROM mirror that the bank loop left on 0x68-0x7F. */
+     * is XIP'd from flash (pce_osd_getromdata), so the RAM_EMU bump is free to
+     * host the CD RAM. Banks 0x68-0x87 are contiguous: 0x80-0x87 is the 64KB
+     * base RAM, 0x68-0x7F adds the 192KB Super CD RAM (256KB total). Without
+     * this every CD bank aliases the shared 8KB NULLRAM and a loaded game
+     * overwrites itself, then traps. Done last so it overrides the System-Card
+     * ROM mirror that the bank loop left on 0x68-0x7F. */
     if (strcmp(ACTIVE_FILE->ext, "cue") == 0) {
-        uint8_t  *buf  = (uint8_t *)&_PCE_ROM_UNPACK_BUFFER;
-        uint32_t  room = (uint32_t)&_PCE_ROM_UNPACK_BUFFER_SIZE;
         int total_banks = PCE_CD_RAM_LAST_BANK - PCE_CD_RAM_FIRST_BANK + 1;  /* 32 = 256KB */
-        int buf_banks   = (int)(room / PCE_CD_RAM_BANK_SIZE);
+        int buf_banks   = (int)(ram_get_free_size() / PCE_CD_RAM_BANK_SIZE);
         if (buf_banks > total_banks) buf_banks = total_banks;
-        /* The unpack buffer is ~10KB shy of the full 256KB, so borrow the few
-         * leftover banks from PCE_EXRAM_BUF — the Populous on-board RAM, which
-         * is idle for CD (HuCard and CD never load together). Banks are mapped
-         * independently via MemoryMap, so the two pools needn't be contiguous. */
+        uint8_t *buf = NULL;
+        if (buf_banks > 0)
+            buf = (uint8_t *)ram_malloc((size_t)buf_banks * PCE_CD_RAM_BANK_SIZE);
+        if (!buf)
+            buf_banks = 0;
+        /* If ram_malloc couldn't cover all 32 banks, borrow PCE_EXRAM_BUF
+         * (Populous on-board RAM, idle on CD) then save_buffer. */
         int exram_banks = (int)(sizeof(PCE_EXRAM_BUF) / PCE_CD_RAM_BANK_SIZE);
         int from_exram  = total_banks - buf_banks;
         if (from_exram < 0) from_exram = 0;
@@ -696,23 +720,11 @@ void LoadCartPCE() {
             PCE.MemoryMapW[v] = p;
         }
         if (from_exram) memset(PCE_EXRAM_BUF, 0, (uint32_t)from_exram * PCE_CD_RAM_BANK_SIZE);
-        if (buf_banks > 0) {
-            uint32_t clear_sz = (uint32_t)buf_banks * PCE_CD_RAM_BANK_SIZE;
-            if (clear_sz > room)
-                clear_sz = room;
-            memset(buf, 0, clear_sz);
-        }
-        /* STILL short of the full 32 banks (unpack ~174KB=21 + EXRAM 32KB=4 = 25 on
-         * device, so 7 banks/56KB missing)? Borrow the save-state staging buffer
-         * (save_buffer, SAVE_STATE_BUFFER_SIZE ~78KB). It is touched ONLY during
-         * Save/Load — idle during play — and it lives OUTSIDE the unpack buffer, so
-         * borrowing it is a NET GAIN (unlike enlarging a static buffer, which would
-         * just shrink the unpack pool by the same amount). This is what lets a full
-         * 256KB Super CD-ROM² game (Dynastic Hero) map all 32 banks and BOOT on the
-         * device — proven necessary: host maps 32/32 and boots it, device mapped 25/32
-         * and hung in the System-Card IPL. Caveat: a state Save of a game that actually
-         * uses banks 25-31 will clobber them (save_buffer doubles as save staging);
-         * booting is the priority and small CD games never touch those banks. */
+        if (buf_banks > 0)
+            memset(buf, 0, (uint32_t)buf_banks * PCE_CD_RAM_BANK_SIZE);
+        /* STILL short of the full 32 banks? Borrow save_buffer (~78KB). Idle
+         * during play; a state Save of a game using those high banks will
+         * clobber them — booting is the priority. */
         int save_banks_cap = (int)(sizeof(save_buffer) / PCE_CD_RAM_BANK_SIZE);
         int from_save = total_banks - mapped;
         if (from_save < 0) from_save = 0;
@@ -725,15 +737,10 @@ void LoadCartPCE() {
         }
         if (from_save) memset(save_buffer, 0, (uint32_t)from_save * PCE_CD_RAM_BANK_SIZE);
         mapped += from_save;
-#ifdef LINUX_EMU   /* host only: on-device this fopen + the open .bin = 1-file-limit corruption */
-        FILE *cf = fopen("pcecd_diag.txt", "a");
-        if (cf) {
-            fprintf(cf, "CDRAM map: room=%lu buf_banks=%d exram=%d save=%d mapped=%d/%d %s\n",
-                    (unsigned long)room, buf_banks, from_exram, from_save, mapped, total_banks,
-                    (mapped >= total_banks) ? "FULL" : "PARTIAL");
-            fclose(cf);
-        }
-#endif
+        printf("CDRAM map: free=%lu buf_banks=%d exram=%d save=%d mapped=%d/%d %s\n",
+                (unsigned long)ram_get_free_size(), buf_banks, from_exram, from_save, mapped, total_banks,
+                (mapped >= total_banks) ? "FULL" : "PARTIAL");
+
         /* BRAM: per-game .sram file (managed by the launcher like any SRAM). */
         pce_sram_load();
     }
@@ -875,6 +882,11 @@ void pce_osd_gfx_blit() {
  * with common_emu_sound_sync. */
 static void pce_sound_sync_with_prefetch(void)
 {
+#ifdef HOST_BUILD
+    /* Host has no SAI DMA ISR: common_emu_sound_sync advances dma_counter. */
+    common_emu_sound_sync(false);
+    return;
+#endif
     if (common_emu_state.skip_frames)
         return;                     /* running behind: no wait, no extra SD work */
     if (common_emu_sound_dma_marker == 0)
@@ -949,7 +961,7 @@ static void apply_cpu_clock(void)
      * (exit resets the clock), no-op on OSPI1 SD hardware (guarded inside). The
      * actual clock is proven in /pcecd_diag.txt at disc mount ("clock=... MHz"). */
     if (is_pce_cd())
-        SystemClock_Config(2);
+        SystemClock_Config(3);
 }
 
 static void sleep_wake_up()
@@ -964,13 +976,19 @@ static void sleep_wake_up()
      * sample pacing matches again (same MSX/Genesis/NES/Amstrad pattern;
      * SystemClock_Config reprograms the audio PLL). */
     if (is_pce_cd()) {
-        SystemClock_Config(2);
+        SystemClock_Config(3);
         odroid_audio_init(odroid_audio_sample_rate_get());
         audio_start_playing_full_length(audio_get_buffer_full_length());
     }
 }
 
+#define PCE_PROFILE 0
+
 int app_main_pce(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
+#if PCE_PROFILE
+    uint32_t prof_scsi = 0, prof_emu = 0, prof_wait = 0, prof_blit = 0, prof_pcm = 0, prof_sync = 0;
+    uint32_t prof_frames = 0, prof_drawn = 0, prof_wall = 0, prof_wall_t0 = 0;
+#endif
     if (start_paused) {
         common_emu_state.pause_after_frames = 2;
         odroid_audio_mute(true);
@@ -1023,6 +1041,8 @@ int app_main_pce(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
 #endif
 
     LoadCartPCE();
+    if (PCE.ROM == NULL)
+        printf("LoadCartPCE FAILED (no ROM/BIOS — check HOST_SD bios/pce/syscard3.pce for CD)\n");
     ResetPCE(false);
     printf("PCE Core initialized\n");
 
@@ -1038,6 +1058,10 @@ int app_main_pce(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
     odroid_dialog_choice_t options[] = {
             ODROID_DIALOG_CHOICE_LAST
     };
+#if PCE_PROFILE
+    common_emu_enable_dwt_cycles();
+    prof_wall_t0 = common_emu_get_dwt_cycles();
+#endif
     while (true) {
         wdog_refresh();
 
@@ -1063,22 +1087,75 @@ int app_main_pce(uint8_t load_state, uint8_t start_paused, int8_t save_slot) {
 
         pce_input_read(&joystick);
 
+#if PCE_PROFILE
+        uint32_t t_a = common_emu_get_dwt_cycles();
+#endif
         /* Chunked SCSI->ADPCM DMA pump (<=8KB/frame) — see pce_scsi_run. */
         pce_scsi_run();
+#if PCE_PROFILE
+        uint32_t t_b = common_emu_get_dwt_cycles();
+#endif
 
         s_skip_render = !drawFrame;   /* drop tile/sprite work on skip frames */
         for (PCE.Scanline = 0; PCE.Scanline < 263; ++PCE.Scanline) {
             gfx_run();
         }
         s_skip_render = false;        /* never leak into menu/screenshot paths */
+#if PCE_PROFILE
+        uint32_t t_c = common_emu_get_dwt_cycles();
+#endif
 
+#if PCE_PROFILE
+        uint32_t t_c2 = t_c;
+#endif
         if (drawFrame) {
+#if PCE_PROFILE
+            /* Drain any pending vblank stall here so t_d - t_c2 is pure pixel
+             * work. Near zero while the firmware's lcd_get_active_buffer() does
+             * not block. */
+            (void)lcd_get_active_buffer();
+            t_c2 = common_emu_get_dwt_cycles();
+            prof_wait += t_c2 - t_c;
+#endif
             pce_osd_gfx_blit();
         }
+#if PCE_PROFILE
+        uint32_t t_d = common_emu_get_dwt_cycles();
+#endif
 
         pce_pcm_submit();
+#if PCE_PROFILE
+        uint32_t t_e = common_emu_get_dwt_cycles();
+#endif
 
         pce_sound_sync_with_prefetch();   /* sound_sync + CD-DA prefetch in the wait */
+#if PCE_PROFILE
+        {
+            uint32_t t_f = common_emu_get_dwt_cycles();
+            prof_scsi += t_b - t_a;
+            prof_emu  += t_c - t_b;
+            prof_blit += t_d - t_c2;
+            prof_pcm  += t_e - t_d;
+            prof_sync += t_f - t_e;
+            prof_drawn += drawFrame ? 1 : 0;
+            if (++prof_frames == 60) {
+                prof_wall = t_f - prof_wall_t0;
+                /* Printed in execution order. sync and wait are both idle: sync
+                 * should hold the slack (SAI pacing) and wait should be near
+                 * zero — if wait grows, the vblank is pacing us again. */
+                printf("prof/60f: scsi=%lu emu=%lu wait=%lu blit=%lu pcm=%lu sync=%lu wall=%lu (%lu us/frame, drawn=%lu)\n",
+                    (unsigned long)(prof_scsi / 60), (unsigned long)(prof_emu / 60),
+                    (unsigned long)(prof_wait / 60), (unsigned long)(prof_blit / 60),
+                    (unsigned long)(prof_pcm / 60), (unsigned long)(prof_sync / 60),
+                    (unsigned long)(prof_wall / 60),
+                    (unsigned long)((prof_wall / 60) / (get_SystemCoreClock() / 1000000u)),
+                    (unsigned long)prof_drawn);
+                prof_scsi = prof_emu = prof_wait = prof_blit = prof_pcm = prof_sync = 0;
+                prof_frames = prof_drawn = 0;
+                prof_wall_t0 = common_emu_get_dwt_cycles();
+            }
+        }
+#endif
 
         pce_adpcm_frame_end();
 

@@ -72,6 +72,20 @@ static int quit_requested;
 static uint8_t *ram_pool;
 static size_t ram_pool_size;
 static size_t ram_pool_used;
+static unsigned ram_alloc_count;
+
+/* Device-like pool budgets (host uses bump pools so used/free is meaningful). */
+#define HOST_RAM_EMU_SIZE (1u * 1024u * 1024u) /* match device RAM_EMU budget */
+#define HOST_AHB_SIZE     (56u * 1024u)         /* ~AHB leftover after firmware */
+#define HOST_DTCM_SIZE    (104u * 1024u)        /* core DTCM bump (~104 KiB) */
+#define HOST_ITCM_SIZE    (64u * 1024u)
+
+static uint8_t host_ram_emu[HOST_RAM_EMU_SIZE];
+static uint8_t host_ahb[HOST_AHB_SIZE];
+static uint8_t host_dtcm[HOST_DTCM_SIZE];
+static uint8_t host_itcm[HOST_ITCM_SIZE];
+static size_t ahb_used, dtc_used, itc_used;
+static unsigned ahb_alloc_count, dtc_alloc_count, itc_alloc_count;
 static int32_t settings_beep = 1;
 static state_handler_t host_load_state_cb;
 static state_handler_t host_save_state_cb;
@@ -194,10 +208,38 @@ void gw_core_bridge_init(void)
 #else
     strncpy(host_active_file.name, "(no rom)", sizeof(host_active_file.name) - 1);
 #endif
-    ram_pool_size = 4 * 1024 * 1024;
-    ram_pool = (uint8_t *)malloc(ram_pool_size);
+    ram_pool = host_ram_emu;
+    ram_pool_size = HOST_RAM_EMU_SIZE;
     ram_pool_used = 0;
+    ram_alloc_count = 0;
+    ahb_used = dtc_used = itc_used = 0;
+    ahb_alloc_count = dtc_alloc_count = itc_alloc_count = 0;
+    ram_start = 0; /* host alloc uses ram_pool; ram_start is device-only */
     frame_start_ms = host_platform_ticks_ms();
+}
+
+void *host_ram_pool_base(void)
+{
+    return ram_pool;
+}
+
+static void *host_bump_alloc(const char *pool, uint8_t *base, size_t *used, size_t cap,
+                             unsigned *nalloc, size_t size)
+{
+    void *p;
+    size_t req = size;
+    size = (size + 7u) & ~7u;
+    if (*used + size > cap) {
+        printf("mem FAIL  %-7s  +%zu B  total %zu / %zu B (OOM)\n",
+               pool, req, *used, cap);
+        return NULL;
+    }
+    p = base + *used;
+    *used += size;
+    (*nalloc)++;
+    printf("mem ALLOC %-7s  +%zu B  total %zu / %zu B  (%zu KiB)\n",
+           pool, size, *used, cap, *used / 1024u);
+    return p;
 }
 
 void host_set_rom_path(const char *path)
@@ -683,13 +725,22 @@ uint8_t *odroid_overlay_cache_file_in_flash(const char *file_path, uint32_t *fil
     long sz;
     uint8_t *buf;
     size_t n;
+    char mapped[1024];
+    const char *path = file_path;
 
     (void)byte_swap;
     if (file_size_p)
         *file_size_p = 0;
     if (!file_path || !file_path[0])
         return NULL;
-    f = fopen(file_path, "rb");
+
+    /* Firmware SD paths ("/bios/...", "/roms/...") → $HOST_SD + path. */
+    if (file_path[0] == '/' || file_path[0] == '\\') {
+        if (host_map_sd_path(file_path, mapped, sizeof(mapped)) == 0)
+            path = mapped;
+    }
+
+    f = fopen(path, "rb");
     if (!f)
         return NULL;
     if (fseek(f, 0, SEEK_END) != 0) {
@@ -916,13 +967,12 @@ bool odroid_settings_ActiveGameGenieCodes_set(char *game_path, int code_index, b
 
 void *ram_malloc(size_t size)
 {
-    void *p;
-    size = (size + 7u) & ~7u;
-    if (!ram_pool || ram_pool_used + size > ram_pool_size)
-        return NULL;
-    p = ram_pool + ram_pool_used;
-    ram_pool_used += size;
-    return p;
+    if (!ram_pool) {
+        ram_pool = host_ram_emu;
+        ram_pool_size = HOST_RAM_EMU_SIZE;
+    }
+    return host_bump_alloc("RAM_EMU", ram_pool, &ram_pool_used, ram_pool_size,
+                           &ram_alloc_count, size);
 }
 
 void *ram_calloc(size_t count, size_t size)
@@ -941,20 +991,82 @@ size_t ram_get_free_size(void)
 
 void ram_init(void)
 {
+    if (!ram_pool) {
+        ram_pool = host_ram_emu;
+        ram_pool_size = HOST_RAM_EMU_SIZE;
+    }
     ram_pool_used = 0;
+    ram_alloc_count = 0;
 }
 
-void *ahb_malloc(size_t size) { return malloc(size); }
-void *ahb_calloc(size_t count, size_t size) { return calloc(count, size); }
-size_t ahb_get_free_size(void) { return 1024 * 1024; }
-void itc_init(void) {}
-void *itc_malloc(size_t size) { return malloc(size); }
-void *itc_calloc(size_t count, size_t size) { return calloc(count, size); }
-size_t itc_get_free_size(void) { return 64 * 1024; }
-void dtc_init(void) {}
-void *dtc_malloc(size_t size) { return malloc(size); }
-void *dtc_calloc(size_t count, size_t size) { return calloc(count, size); }
-size_t dtc_get_free_size(void) { return 64 * 1024; }
+void *ahb_malloc(size_t size)
+{
+    return host_bump_alloc("AHB", host_ahb, &ahb_used, HOST_AHB_SIZE, &ahb_alloc_count, size);
+}
+
+void *ahb_calloc(size_t count, size_t size)
+{
+    size_t n = count * size;
+    void *p = ahb_malloc(n);
+    if (p)
+        memset(p, 0, n);
+    return p;
+}
+
+size_t ahb_get_free_size(void)
+{
+    return HOST_AHB_SIZE - ahb_used;
+}
+
+void itc_init(void)
+{
+    itc_used = 0;
+    itc_alloc_count = 0;
+}
+
+void *itc_malloc(size_t size)
+{
+    return host_bump_alloc("ITCM", host_itcm, &itc_used, HOST_ITCM_SIZE, &itc_alloc_count, size);
+}
+
+void *itc_calloc(size_t count, size_t size)
+{
+    size_t n = count * size;
+    void *p = itc_malloc(n);
+    if (p)
+        memset(p, 0, n);
+    return p;
+}
+
+size_t itc_get_free_size(void)
+{
+    return HOST_ITCM_SIZE - itc_used;
+}
+
+void dtc_init(void)
+{
+    dtc_used = 0;
+    dtc_alloc_count = 0;
+}
+
+void *dtc_malloc(size_t size)
+{
+    return host_bump_alloc("DTCM", host_dtcm, &dtc_used, HOST_DTCM_SIZE, &dtc_alloc_count, size);
+}
+
+void *dtc_calloc(size_t count, size_t size)
+{
+    size_t n = count * size;
+    void *p = dtc_malloc(n);
+    if (p)
+        memset(p, 0, n);
+    return p;
+}
+
+size_t dtc_get_free_size(void)
+{
+    return HOST_DTCM_SIZE - dtc_used;
+}
 
 void wdog_refresh(void)
 {
