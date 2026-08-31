@@ -44,7 +44,12 @@ static int adpcm_decode(uint8_t nib)
     if (nib & 8) d = -d;
     s_ssi += StepIdxDelta[nib];
     if (s_ssi < 0) s_ssi = 0; else if (s_ssi > 48) s_ssi = 48;
-    s_cur = (s_cur + d) & 0xFFF;
+    /* The MSM5205 has an overflow-prevent circuit: the 12-bit accumulator
+     * saturates (MAME clamps to [-2048,2047], i.e. [0,4095] around the 0x800
+     * bias). Masking instead let a DC-biased stream drift to 4095 and wrap to
+     * 0, flipping the output from +32752 to -32768 mid-speech. */
+    s_cur += d;
+    if (s_cur < 0) s_cur = 0; else if (s_cur > 4095) s_cur = 4095;
     return s_cur;
 }
 
