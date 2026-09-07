@@ -8,6 +8,8 @@
     "pcecd": {
       "shortName": "PCE CD",
       "compression": false,
+      "biosDir": "pce",
+      "$comment": "The System Card lives in /bios/pce/, not /bios/pcecd/: the firmware reads it from the plain PC Engine folder that this core's other system uses. Confirmed against main_pce.c.",
       "extensions": [
         [
           ".cue",
