@@ -1,6 +1,6 @@
 # Changelog
 
-## [v0.0.2] - 2026-09-06
+## [v0.0.2] - 2026-09-08
 
 ### Added
 
@@ -19,6 +19,9 @@
 - The PC Engine CD system declares the System Card 3 BIOS it cannot run
   without, with a hash, and states that a `.cue` travels with its `.bin`
   tracks so an installer cannot copy half a game and report success.
+- `biosDir` says the System Card lives in `/bios/pce/`, not `/bios/pcecd/`.
+  The ROM folder and the BIOS folder are separate keys that happen to match
+  for most systems and do not here, so nothing could have derived it.
 
 ### Changed
 
