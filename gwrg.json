@@ -1,5 +1,4 @@
 {
-  "$comment": "The hand-written half of this project's manifest. Everything else -- the systems, their folders, extensions and browse mode, the firmware ABI, sizes and hashes -- is derived from the packed core by scripts/make_manifest.py. Nothing derivable belongs here.",
   "systems": {
     "pce": {
       "shortName": "PCE",
@@ -9,7 +8,7 @@
       "shortName": "PCE CD",
       "compression": false,
       "biosDir": "pce",
-      "$comment": "The System Card lives in /bios/pce/, not /bios/pcecd/: the firmware reads it from the plain PC Engine folder that this core's other system uses. Confirmed against main_pce.c.",
+      "$comment": "The System Card lives in /bios/pce/, not /bios/pcecd/ -- main_pce.c:38-39 names both accepted spellings there.",
       "extensions": [
         [
           ".cue",
