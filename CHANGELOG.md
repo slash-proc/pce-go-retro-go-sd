@@ -1,5 +1,18 @@
 # Changelog
 
+## [v0.0.4] - 2026-09-11
+
+### Fixed
+
+- The manifest declares `biosDir` again, so an installer asks for the System
+  Card in the folder the core reads. `pcecd` is the ROM folder key and `pce`
+  the BIOS folder key -- `main_pce.c:38-39` names both accepted spellings under
+  `/bios/pce/` -- and `gwrg.json` has said so since the field existed. The
+  shared manifest generator accepted the value, validated it, and then dropped
+  it from the system it emitted, so every release up to v0.0.3 published a
+  manifest with no `biosDir` and sent the user to `/bios/pcecd/`, where the
+  core never looks. PC Engine CD games do not start without it.
+
 ## [v0.0.3] - 2026-09-09
 
 ### Changed
