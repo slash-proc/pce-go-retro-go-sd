@@ -2,11 +2,19 @@
   "systems": {
     "pce": {
       "shortName": "PCE",
-      "compression": false
+      "compression": false,
+      "runtime": {
+        "savestate": { "supported": true },
+        "save": { "supported": true, "bytes": 2048 }
+      }
     },
     "pcecd": {
       "shortName": "PCE CD",
       "compression": false,
+      "runtime": {
+        "savestate": { "supported": true },
+        "save": { "supported": true, "bytes": 2048 }
+      },
       "biosDir": "pce",
       "$comment": "The System Card lives in /bios/pce/, not /bios/pcecd/ -- main_pce.c:38-39 names both accepted spellings there.",
       "extensions": [
